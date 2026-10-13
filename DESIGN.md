@@ -25,7 +25,7 @@ if you change a value there, update this table too.
 | M2 (during windup) | Feint: cancel the swing to bait a parry |
 | F (tap) | Parry |
 | F (hold) | Block |
-| Q | Dodge in movement direction. Forward dodge = dash attack |
+| Q | Dodge forward, back, left or right (no diagonals). Forward dodge = dash attack |
 | W W | Sprint |
 | Left Shift | Toggle shift lock |
 
@@ -47,8 +47,10 @@ if you change a value there, update this table too.
 | Value | Setting | Notes |
 | --- | --- | --- |
 | Windup | 0.25s | The parry tell. Kept slight for pace |
-| Combo length | 4 | The 4th hit is a heavier finisher |
-| Hitstun | 0.45s | |
+| Combo length | 4 | The 4th hit is the finisher |
+| Damage | 8 per hit | Finisher deals 1.2x (9.6) |
+| Hitstun | 0.8s | Longer than the gap to the next hit, so a clean M1 chain is a guaranteed combo |
+| Finisher | Knockback | Launches the target away (60 studs/s) with 1.0s stun |
 
 ### Feints
 
@@ -65,8 +67,11 @@ if you change a value there, update this table too.
 | Charges | 2 | |
 | Recharge | 1.5s | Every dodge restarts the timer. When it finishes, all charges refill |
 | I-frames | 0.3s | |
+| Directions | 4, relative to facing | Input snaps to forward, back, left or right, like Jujutsu Shenanigans |
+| Side/back dodge | 0.22s at 70 studs/s | |
+| Forward dodge | 0.38s at 65 studs/s | A longer lunge. The dash attack hits as it ends |
 | Exit speed | Sprint speed | A dodge leaves you at max speed in that direction |
-| Forward dodge | Dash attack | Opens the M1 combo: the next M1 is hit 2 |
+| Dash attack | Opens the combo | Counts as hit 1, so the next M1 is hit 2 |
 
 **Recharge rule:** using one dodge and waiting refills it, so you never sit at
 one charge after a pause. Using both empties you until the timer finishes, then

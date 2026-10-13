@@ -11,10 +11,13 @@
 --   FeintReadyAt  (number)  workspace:GetServerTimeNow() when feint is off cooldown
 
 local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Config = require(ReplicatedStorage.Shared.CombatConfig)
+local Knockback = require(ReplicatedStorage.Shared.Knockback)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Fx = require(script.Parent.Fx)
 
 type AttackProfile = Config.AttackProfile
@@ -212,6 +215,26 @@ function CombatService.stopBlock(model: Model)
 	end
 end
 
+-- Players own their character's physics, so their own client applies the launch;
+-- the server applies it directly to NPCs.
+local function launch(attacker: CombatState, defender: CombatState, speed: number)
+	local away = defender.root.Position - attacker.root.Position
+	away = Vector3.new(away.X, 0, away.Z)
+	if away.Magnitude < 1e-3 then
+		away = attacker.root.CFrame.LookVector
+		away = Vector3.new(away.X, 0, away.Z)
+	end
+	local horizontal = away.Unit * speed
+	local cfg = Config.Attack
+
+	local player = Players:GetPlayerFromCharacter(defender.model)
+	if player then
+		Remotes.Knockback:FireClient(player, horizontal, cfg.KnockbackUpSpeed, cfg.KnockbackDuration)
+	else
+		Knockback.apply(defender.root, horizontal, cfg.KnockbackUpSpeed, cfg.KnockbackDuration)
+	end
+end
+
 type HitResult = "Dodged" | "Parried" | "Blocked" | "GuardBroken" | "Hit"
 
 local function resolveHit(attacker: CombatState, defender: CombatState, profile: AttackProfile): HitResult
@@ -249,7 +272,11 @@ local function resolveHit(attacker: CombatState, defender: CombatState, profile:
 	end
 
 	defender.humanoid:TakeDamage(profile.Damage)
-	applyStun(defender, Config.Attack.HitStun)
+	-- Hitstun outlasts the gap to the attacker's next hit, so M1 chains are true combos.
+	applyStun(defender, profile.HitStun)
+	if profile.Knockback then
+		launch(attacker, defender, profile.Knockback)
+	end
 	Fx.flash(defender.model, Color3.fromRGB(255, 40, 40), 0.2)
 	return "Hit"
 end

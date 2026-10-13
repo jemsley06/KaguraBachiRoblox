@@ -15,17 +15,18 @@ CombatConfig.Movement = {
 	SprintFov = 80,
 }
 
--- Q dodge: a short burst in the direction you're moving.
+-- Q dodge, Jujutsu Shenanigans style: snaps to one of four directions relative to
+-- the character (forward, back, left, right), never diagonal.
 CombatConfig.Dash = {
 	Speed = 70,
-	Duration = 0.22,
+	Duration = 0.22, -- back and side dodges
+	-- Forward dodge is a longer lunge that ends in the dash attack.
+	FrontSpeed = 65,
+	FrontDuration = 0.38,
 	Charges = 2,
 	-- Every dodge restarts this timer; when it completes, all charges refill.
 	RechargeTime = 1.5,
 	IFrames = 0.3, -- invulnerable window from the start of the dodge (server side)
-	-- Dot product between dodge direction and facing above which a dodge counts
-	-- as "forward" and triggers a dash attack.
-	ForwardDot = 0.7,
 }
 
 CombatConfig.ShiftLock = {
@@ -63,41 +64,52 @@ export type AttackProfile = {
 	Width: number,
 	Damage: number,
 	PostureDamage: number,
+	HitStun: number, -- how long a clean hit stuns the target
+	Knockback: number?, -- horizontal launch speed on a clean hit (studs/s)
 }
+
+local BASE_DAMAGE = 8
 
 -- M1 combo.
 CombatConfig.Attack = {
 	ComboLength = 4,
 	ComboResetTime = 1.0, -- idle time after which the combo restarts at hit 1
-	HitStun = 0.45,
+	-- Hitstun is longer than the gap between hit frames (recovery + next windup),
+	-- so a clean M1 chain can't be escaped: the combo is guaranteed until the finisher.
+	KnockbackUpSpeed = 22, -- vertical pop on knockback hits
+	KnockbackDuration = 0.25, -- how long the horizontal launch force is held
 
 	Normal = {
 		Windup = 0.25, -- slight windup: the parry tell
 		Recovery = 0.3,
 		Range = 7,
 		Width = 6,
-		Damage = 8,
+		Damage = BASE_DAMAGE,
 		PostureDamage = 20,
+		HitStun = 0.8,
 	} :: AttackProfile,
 
-	Finisher = { -- last hit of the combo
+	Finisher = { -- last hit of the combo: knocks the target away
 		Windup = 0.3,
 		Recovery = 1.0,
 		Range = 7,
 		Width = 7,
-		Damage = 14,
+		Damage = BASE_DAMAGE * 1.2,
 		PostureDamage = 35,
+		HitStun = 1.0,
+		Knockback = 60,
 	} :: AttackProfile,
 
-	-- Forward dodge. Counts as hit 1 of the combo. The windup roughly matches
-	-- the dodge duration so the hit lands as the dodge ends.
+	-- Forward dodge. Counts as hit 1 of the combo. The windup equals the forward
+	-- dodge's duration so the hit lands as the lunge ends.
 	Dash = {
-		Windup = 0.2,
+		Windup = CombatConfig.Dash.FrontDuration,
 		Recovery = 0.3,
 		Range = 8,
 		Width = 6,
-		Damage = 8,
+		Damage = BASE_DAMAGE,
 		PostureDamage = 20,
+		HitStun = 0.8,
 	} :: AttackProfile,
 }
 

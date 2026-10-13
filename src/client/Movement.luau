@@ -9,6 +9,7 @@ local Workspace = game:GetService("Workspace")
 
 local Config = require(ReplicatedStorage.Shared.CombatConfig)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local Knockback = require(ReplicatedStorage.Shared.Knockback)
 
 local player = Players.LocalPlayer
 
@@ -41,16 +42,23 @@ local function flatten(v: Vector3): Vector3
 	return Vector3.new(v.X, 0, v.Z)
 end
 
-local function classifyDirection(direction: Vector3, root: BasePart): string
+-- Snap the input to one of the character's four directions (JJS style, no diagonals).
+-- Whichever axis the input leans toward more wins; exact diagonals count as forward/back.
+local function snapDirection(input: Vector3, root: BasePart): (string, Vector3)
 	local look = flatten(root.CFrame.LookVector).Unit
 	local right = flatten(root.CFrame.RightVector).Unit
-	local forwardDot = direction:Dot(look)
-	if forwardDot >= Config.Dash.ForwardDot then
-		return "Front"
-	elseif forwardDot <= -Config.Dash.ForwardDot then
-		return "Back"
+	local forwardDot = input:Dot(look)
+	local rightDot = input:Dot(right)
+	if math.abs(forwardDot) >= math.abs(rightDot) then
+		if forwardDot >= 0 then
+			return "Front", look
+		end
+		return "Back", -look
 	end
-	return if direction:Dot(right) > 0 then "Right" else "Left"
+	if rightDot > 0 then
+		return "Right", right
+	end
+	return "Left", -right
 end
 
 function Movement.getDodgeCharges(): number
@@ -81,18 +89,19 @@ function Movement.dash()
 		return
 	end
 
-	-- Dodge where you're moving; with no input, dodge forward.
-	local direction = flatten(humanoid.MoveDirection)
-	if direction.Magnitude < 0.1 then
-		direction = flatten(root.CFrame.LookVector)
+	-- Dodge toward the movement input, snapped to 4 directions; with no input, dodge forward.
+	local input = flatten(humanoid.MoveDirection)
+	if input.Magnitude < 0.1 then
+		input = flatten(root.CFrame.LookVector)
 	end
-	direction = direction.Unit
+	local directionName, direction = snapDirection(input, root)
+	local isFront = directionName == "Front"
 
 	dodgeCharges -= 1
 	dodgeRechargeAt = os.clock() + Config.Dash.RechargeTime
 	dashing = true
-	-- Forward dodges become dash attacks on the server.
-	Remotes.Combat:FireServer("Dash", classifyDirection(direction, root))
+	-- Forward dodges become dash attacks on the server, landing as the lunge ends.
+	Remotes.Combat:FireServer("Dash", directionName)
 
 	-- Plane mode only constrains horizontal velocity, so gravity still works mid-dodge.
 	local attachment = root:FindFirstChild("RootAttachment") :: Attachment?
@@ -114,10 +123,12 @@ function Movement.dash()
 	velocity.Parent = root
 
 	local cfg = Config.Dash
+	local dashSpeed = if isFront then cfg.FrontSpeed else cfg.Speed
+	local duration = if isFront then cfg.FrontDuration else cfg.Duration
 	local start = os.clock()
 	local connection
 	connection = RunService.Heartbeat:Connect(function()
-		local alpha = (os.clock() - start) / cfg.Duration
+		local alpha = (os.clock() - start) / duration
 		if alpha >= 1 or not velocity.Parent then
 			connection:Disconnect()
 			velocity:Destroy()
@@ -132,7 +143,7 @@ function Movement.dash()
 			return
 		end
 		-- Ease out from full dodge speed down to sprint speed so it flows into movement.
-		local speed = cfg.Speed + (Config.Movement.SprintSpeed - cfg.Speed) * alpha * alpha
+		local speed = dashSpeed + (Config.Movement.SprintSpeed - dashSpeed) * alpha * alpha
 		velocity.PlaneVelocity = Vector2.new(direction.X, direction.Z) * speed
 	end)
 end
@@ -206,5 +217,16 @@ player.CharacterAdded:Connect(function()
 end)
 
 RunService.RenderStepped:Connect(update)
+
+-- The server can't reliably move a player's character (the client owns its physics),
+-- so knockback from finishers is applied here when the server asks.
+Remotes.Knockback.OnClientEvent:Connect(function(horizontal: Vector3, upSpeed: number, duration: number)
+	local _, _, root = getCharacterParts()
+	if root then
+		sprinting = false
+		currentSpeed = 0
+		Knockback.apply(root, horizontal, upSpeed, duration)
+	end
+end)
 
 return Movement

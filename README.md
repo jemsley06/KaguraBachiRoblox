@@ -14,11 +14,11 @@ The code is synced into Roblox Studio with [Rojo](https://rojo.space):
 
 | Input | Action |
 | --- | --- |
-| M1 | Attack (4-hit combo, the last hit is a heavier finisher) |
+| M1 | Attack (4-hit combo, hits stun so the chain can't be escaped. The last hit does 1.2x damage and knocks the target away) |
 | M2 | Feint: cancel a swing during its windup (2s cooldown) |
 | F (tap) | Parry: the first 0.2s of a block deflects a hit and stuns the attacker |
 | F (hold) | Block: no HP damage, but fills posture. A full posture bar breaks your guard |
-| Q | Dodge (2 charges, 0.3s i-frames). A forward dodge is a dash attack that opens the combo |
+| Q | Dodge forward, back, left or right (2 charges, 0.3s i-frames). The forward dodge is a longer lunge ending in a dash attack that opens the combo |
 | W W | Double-tap W to sprint |
 | Left Shift | Toggle shift lock |
 
