@@ -10,6 +10,7 @@ local Workspace = game:GetService("Workspace")
 local Config = require(ReplicatedStorage.Shared.CombatConfig)
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Knockback = require(ReplicatedStorage.Shared.Knockback)
+local Ragdoll = require(ReplicatedStorage.Shared.Ragdoll)
 
 local player = Players.LocalPlayer
 
@@ -19,6 +20,7 @@ local sprinting = false
 local lastForwardTap = 0
 local dashing = false
 local jumpEnabled = true
+local ragdolled = false
 local currentSpeed = Config.Movement.WalkSpeed
 
 -- Predicted locally (same rule as the server) so the HUD and input feel instant.
@@ -61,6 +63,16 @@ local function snapDirection(input: Vector3, root: BasePart): (string, Vector3)
 	return "Left", -right
 end
 
+-- Rotates `from` toward `to` around the vertical axis by at most `maxAngle` radians.
+local function turnToward(from: Vector3, to: Vector3, maxAngle: number): Vector3
+	local angle = math.acos(math.clamp(from:Dot(to), -1, 1))
+	if angle <= maxAngle then
+		return to
+	end
+	local sign = if from:Cross(to).Y >= 0 then 1 else -1
+	return CFrame.fromAxisAngle(Vector3.yAxis, sign * maxAngle):VectorToWorldSpace(from)
+end
+
 function Movement.getDodgeCharges(): number
 	return dodgeCharges
 end
@@ -97,10 +109,11 @@ function Movement.dash()
 	local directionName, direction = snapDirection(input, root)
 	local isFront = directionName == "Front"
 
-	dodgeCharges -= 1
+	-- The forward lunge spends every charge (same rule as the server).
+	dodgeCharges = if isFront then 0 else dodgeCharges - 1
 	dodgeRechargeAt = os.clock() + Config.Dash.RechargeTime
 	dashing = true
-	-- Forward dodges become dash attacks on the server, landing as the lunge ends.
+	-- Forward dodges become dash attacks on the server, hitting on contact.
 	Remotes.Combat:FireServer("Dash", directionName)
 
 	-- Plane mode only constrains horizontal velocity, so gravity still works mid-dodge.
@@ -126,21 +139,43 @@ function Movement.dash()
 	local dashSpeed = if isFront then cfg.FrontSpeed else cfg.Speed
 	local duration = if isFront then cfg.FrontDuration else cfg.Duration
 	local start = os.clock()
+	-- The lunge faces its own direction while steering, so the server's hitbox follows it.
+	local previousAutoRotate = humanoid.AutoRotate
+	if isFront then
+		humanoid.AutoRotate = false
+	end
+	local sawWindup = false
 	local connection
-	connection = RunService.Heartbeat:Connect(function()
+	connection = RunService.Heartbeat:Connect(function(dt)
 		local alpha = (os.clock() - start) / duration
-		if alpha >= 1 or not velocity.Parent then
+		-- The server flips the swing to Slash on contact: stop at the target, not through it.
+		local phase = character:GetAttribute("SwingPhase")
+		sawWindup = sawWindup or phase == "Windup"
+		local connected = isFront and sawWindup and phase == "Slash"
+		if alpha >= 1 or connected or not velocity.Parent then
 			connection:Disconnect()
 			velocity:Destroy()
 			if createdAttachment and attachment then
 				attachment:Destroy()
 			end
 			dashing = false
+			if isFront then
+				humanoid.AutoRotate = previousAutoRotate
+			end
 			-- Momentum: leave the dodge at max ground speed. If the player keeps
 			-- holding a direction they stay sprinting; otherwise update() resets.
 			currentSpeed = Config.Movement.SprintSpeed
 			sprinting = true
 			return
+		end
+		-- Steer the forward lunge toward the camera, with a capped turn rate.
+		local camera = Workspace.CurrentCamera
+		if isFront and camera then
+			local look = flatten(camera.CFrame.LookVector)
+			if look.Magnitude > 1e-3 then
+				direction = turnToward(direction, look.Unit, cfg.FrontSteerRate * dt)
+				root.CFrame = CFrame.lookAt(root.Position, root.Position + direction)
+			end
 		end
 		-- Ease out from full dodge speed down to sprint speed so it flows into movement.
 		local speed = dashSpeed + (Config.Movement.SprintSpeed - dashSpeed) * alpha * alpha
@@ -197,6 +232,13 @@ local function update(dt: number)
 	end
 	humanoid.WalkSpeed = currentSpeed
 
+	-- The server sets Ragdolled; this client owns the physics, so it applies the state.
+	local shouldRagdoll = character:GetAttribute("Ragdolled") == true
+	if ragdolled ~= shouldRagdoll then
+		ragdolled = shouldRagdoll
+		Ragdoll.setState(humanoid, ragdolled)
+	end
+
 	if jumpEnabled == stunned then
 		jumpEnabled = not stunned
 		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, jumpEnabled)
@@ -212,6 +254,7 @@ player.CharacterAdded:Connect(function()
 	sprinting = false
 	dashing = false
 	jumpEnabled = true
+	ragdolled = false
 	currentSpeed = Config.Movement.WalkSpeed
 	dodgeCharges = Config.Dash.Charges
 end)

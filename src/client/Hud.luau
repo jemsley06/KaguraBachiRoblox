@@ -1,4 +1,4 @@
--- Minimal combat HUD: dodge charges, feint cooldown, and shift lock state.
+-- Minimal combat HUD: posture, dodge charges, feint cooldown, and shift lock state.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -13,6 +13,8 @@ local player = Players.LocalPlayer
 
 local READY_COLOR = Color3.fromRGB(235, 235, 240)
 local SPENT_COLOR = Color3.fromRGB(70, 70, 80)
+local POSTURE_FULL_COLOR = Color3.fromRGB(120, 170, 255)
+local POSTURE_LOW_COLOR = Color3.fromRGB(255, 70, 40)
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "CombatHud"
@@ -50,6 +52,22 @@ local function makeLabel(text: string, width: number): TextLabel
 	return label
 end
 
+-- Posture: drains as your block takes hits, guard breaks when empty.
+local postureBack = Instance.new("Frame")
+postureBack.AnchorPoint = Vector2.new(0.5, 1)
+postureBack.Position = UDim2.new(0.5, 0, 1, -60)
+postureBack.Size = UDim2.fromOffset(220, 8)
+postureBack.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+postureBack.BackgroundTransparency = 0.3
+postureBack.BorderSizePixel = 0
+postureBack.Parent = gui
+
+local postureFill = Instance.new("Frame")
+postureFill.Size = UDim2.fromScale(1, 1)
+postureFill.BackgroundColor3 = POSTURE_FULL_COLOR
+postureFill.BorderSizePixel = 0
+postureFill.Parent = postureBack
+
 local pips: { Frame } = {}
 for i = 1, Config.Dash.Charges do
 	local pip = Instance.new("Frame")
@@ -74,6 +92,12 @@ RunService.RenderStepped:Connect(function()
 	end
 
 	local character = player.Character
+	local posture = character and character:GetAttribute("Posture")
+	local postureMax = Config.Block.PostureMax
+	local ratio = math.clamp(if typeof(posture) == "number" then posture / postureMax else 1, 0, 1)
+	postureFill.Size = UDim2.fromScale(ratio, 1)
+	postureFill.BackgroundColor3 = POSTURE_LOW_COLOR:Lerp(POSTURE_FULL_COLOR, ratio)
+
 	local feintReadyAt = character and character:GetAttribute("FeintReadyAt")
 	local remaining = if typeof(feintReadyAt) == "number" then feintReadyAt - Workspace:GetServerTimeNow() else 0
 	if remaining > 0 then

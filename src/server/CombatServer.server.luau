@@ -63,8 +63,8 @@ local handlers: { [string]: (Model, any) -> () } = {
 	BlockEnd = function(character)
 		CombatService.stopBlock(character)
 	end,
-	Attack = function(character)
-		CombatService.attack(character)
+	Attack = function(character, modifier)
+		CombatService.attack(character, if modifier == "Up" or modifier == "Down" then modifier else nil)
 	end,
 	Feint = function(character)
 		CombatService.feint(character)
