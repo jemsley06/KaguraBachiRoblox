@@ -1,16 +1,23 @@
 -- Server-authoritative combat state for any character model (players and NPCs alike).
 --
 -- Replicated attributes set on each registered model, read by clients:
---   Stunned   (bool)   can't move, attack, block or dash
---   Blocking  (bool)   F is held
---   Attacking (bool)   in a swing's windup
---   Posture   (number) 0..PostureMax, guard breaks when full
+--   Stunned       (bool)    can't move, attack, block or dodge
+--   Blocking      (bool)    F is held
+--   Attacking     (bool)    in a swing's windup
+--   Posture       (number)  0..PostureMax, guard breaks when full
+--   SwingPhase    (string)  "None" | "Windup" | "Slash", drives the swing animation
+--   SwingVariant  (number)  which combo hit is being swung (1..ComboLength)
+--   DodgeCharges  (number)  dodges available
+--   FeintReadyAt  (number)  workspace:GetServerTimeNow() when feint is off cooldown
 
+local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Config = require(ReplicatedStorage.Shared.CombatConfig)
 local Fx = require(script.Parent.Fx)
+
+type AttackProfile = Config.AttackProfile
 
 export type CombatState = {
 	model: Model,
@@ -35,9 +42,14 @@ export type CombatState = {
 	attackReadyAt: number,
 	combo: number,
 	lastAttackTime: number,
+	feintReadyAt: number,
 
-	dashReadyAt: number,
+	dodgeCharges: number,
+	dodgeRechargeAt: number,
 }
+
+local COMBATANT_TAG = "Combatant"
+local SLASH_POSE_TIME = 0.2 -- how long the follow-through pose is held after the hit frame
 
 local CombatService = {}
 
@@ -65,14 +77,20 @@ local function setAttacking(state: CombatState, value: boolean)
 	state.model:SetAttribute("Attacking", value)
 end
 
+-- Cancels a pending swing without stunning (used by stuns and feints).
+local function cancelSwing(state: CombatState)
+	state.attackToken += 1
+	setAttacking(state, false)
+	state.model:SetAttribute("SwingPhase", "None")
+	Fx.clearWindup(state.model)
+end
+
 -- Stun interrupts everything: pending swings, blocks, and parry windows.
 local function applyStun(state: CombatState, duration: number)
 	state.stunUntil = math.max(state.stunUntil, now() + duration)
-	state.attackToken += 1
 	state.parryWindowEnd = 0
-	setAttacking(state, false)
+	cancelSwing(state)
 	setBlocking(state, false)
-	Fx.clearWindup(state.model)
 	state.model:SetAttribute("Stunned", true)
 end
 
@@ -124,7 +142,9 @@ function CombatService.register(model: Model): CombatState?
 		attackReadyAt = 0,
 		combo = 0,
 		lastAttackTime = 0,
-		dashReadyAt = 0,
+		feintReadyAt = 0,
+		dodgeCharges = Config.Dash.Charges,
+		dodgeRechargeAt = 0,
 	}
 	states[model] = state
 
@@ -132,6 +152,11 @@ function CombatService.register(model: Model): CombatState?
 	model:SetAttribute("Blocking", false)
 	model:SetAttribute("Attacking", false)
 	model:SetAttribute("Posture", 0)
+	model:SetAttribute("SwingPhase", "None")
+	model:SetAttribute("SwingVariant", 1)
+	model:SetAttribute("DodgeCharges", state.dodgeCharges)
+	model:SetAttribute("FeintReadyAt", 0)
+	CollectionService:AddTag(model, COMBATANT_TAG)
 
 	humanoid.Died:Connect(function()
 		states[model] = nil
@@ -187,25 +212,10 @@ function CombatService.stopBlock(model: Model)
 	end
 end
 
-function CombatService.dash(model: Model): boolean
-	local state = states[model]
-	if not state or isStunned(state) then
-		return false
-	end
-	local t = now()
-	if t < state.dashReadyAt then
-		return false
-	end
-	state.dashReadyAt = t + Config.Dash.Cooldown
-	state.iframeUntil = t + Config.Dash.IFrames
-	return true
-end
-
 type HitResult = "Dodged" | "Parried" | "Blocked" | "GuardBroken" | "Hit"
 
-local function resolveHit(attacker: CombatState, defender: CombatState, isFinisher: boolean): HitResult
+local function resolveHit(attacker: CombatState, defender: CombatState, profile: AttackProfile): HitResult
 	local t = now()
-	local cfg = Config.Attack
 
 	if t < defender.iframeUntil then
 		return "Dodged"
@@ -224,7 +234,7 @@ local function resolveHit(attacker: CombatState, defender: CombatState, isFinish
 	end
 
 	if facing and defender.blocking then
-		defender.posture += if isFinisher then cfg.FinisherPostureDamage else cfg.PostureDamage
+		defender.posture += profile.PostureDamage
 		defender.lastPostureHit = t
 		if defender.posture >= Config.Block.PostureMax then
 			defender.posture = 0
@@ -238,18 +248,17 @@ local function resolveHit(attacker: CombatState, defender: CombatState, isFinish
 		return "Blocked"
 	end
 
-	defender.humanoid:TakeDamage(if isFinisher then cfg.FinisherDamage else cfg.Damage)
-	applyStun(defender, cfg.HitStun)
+	defender.humanoid:TakeDamage(profile.Damage)
+	applyStun(defender, Config.Attack.HitStun)
 	Fx.flash(defender.model, Color3.fromRGB(255, 40, 40), 0.2)
 	return "Hit"
 end
 
-local function performHit(state: CombatState, isFinisher: boolean)
-	local cfg = Config.Attack
-	local boxCFrame = state.root.CFrame * CFrame.new(0, 0, -cfg.Range / 2)
-	local boxSize = Vector3.new(cfg.Width, 5, cfg.Range)
+local function performHit(state: CombatState, profile: AttackProfile, isHeavy: boolean)
+	local boxCFrame = state.root.CFrame * CFrame.new(0, 0, -profile.Range / 2)
+	local boxSize = Vector3.new(profile.Width, 5, profile.Range)
 
-	Fx.slash(boxCFrame, boxSize, isFinisher)
+	Fx.slash(boxCFrame, boxSize, isHeavy)
 
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
@@ -262,47 +271,107 @@ local function performHit(state: CombatState, isFinisher: boolean)
 			alreadyHit[model] = true
 			local defender = states[model]
 			if defender and defender.humanoid.Health > 0 then
-				resolveHit(state, defender, isFinisher)
+				resolveHit(state, defender, profile)
 			end
 		end
 	end
 end
 
-function CombatService.attack(model: Model)
+-- Starts a swing. `isDashAttack` = triggered by a forward dodge: it always
+-- opens the combo, so the next M1 continues from hit 2.
+-- Returns whether a swing started.
+function CombatService.attack(model: Model, isDashAttack: boolean?): boolean
 	local state = states[model]
 	if not state or state.blocking or state.attacking or isStunned(state) then
-		return
+		return false
 	end
 	local t = now()
 	if t < state.attackReadyAt then
-		return
+		return false
 	end
 
 	local cfg = Config.Attack
-	if t - state.lastAttackTime > cfg.ComboResetTime then
-		state.combo = 0
+	if isDashAttack then
+		state.combo = 1
+	else
+		if t - state.lastAttackTime > cfg.ComboResetTime then
+			state.combo = 0
+		end
+		state.combo = state.combo % cfg.ComboLength + 1
 	end
-	state.combo = state.combo % cfg.ComboLength + 1
 	state.lastAttackTime = t
-	local isFinisher = state.combo == cfg.ComboLength
 
-	state.attackReadyAt = t + cfg.Windup + (if isFinisher then cfg.FinisherCooldown else cfg.Cooldown)
+	local isFinisher = state.combo == cfg.ComboLength
+	local profile: AttackProfile = if isDashAttack then cfg.Dash elseif isFinisher then cfg.Finisher else cfg.Normal
+
+	state.attackReadyAt = t + profile.Windup + profile.Recovery
 	state.attackToken += 1
 	local token = state.attackToken
 	setAttacking(state, true)
-	Fx.windup(model, cfg.Windup, isFinisher)
+	model:SetAttribute("SwingVariant", state.combo)
+	model:SetAttribute("SwingPhase", "Windup")
+	Fx.windup(model, profile.Windup, isFinisher)
 
-	task.delay(cfg.Windup, function()
-		-- A stun (hit, parry, guard break) during windup bumps the token and cancels the swing.
+	task.delay(profile.Windup, function()
+		-- A stun or feint during windup bumps the token and cancels the swing.
 		if states[model] ~= state or state.attackToken ~= token then
 			return
 		end
 		setAttacking(state, false)
-		performHit(state, isFinisher)
+		model:SetAttribute("SwingPhase", "Slash")
+		performHit(state, profile, isFinisher)
+
+		task.delay(SLASH_POSE_TIME, function()
+			if states[model] == state and state.attackToken == token then
+				model:SetAttribute("SwingPhase", "None")
+			end
+		end)
 	end)
+	return true
 end
 
--- Per-frame upkeep: clear expired stuns, regenerate posture.
+-- M2 during windup: cancel the swing to bait a parry. The feinted swing doesn't
+-- advance the combo, and a new swing can start almost immediately.
+function CombatService.feint(model: Model): boolean
+	local state = states[model]
+	if not state or not state.attacking or isStunned(state) then
+		return false
+	end
+	local t = now()
+	if t < state.feintReadyAt then
+		return false
+	end
+
+	cancelSwing(state)
+	state.combo = math.max(0, state.combo - 1)
+	state.attackReadyAt = t + Config.Feint.ReswingDelay
+	state.feintReadyAt = t + Config.Feint.Cooldown
+	model:SetAttribute("FeintReadyAt", workspace:GetServerTimeNow() + Config.Feint.Cooldown)
+	return true
+end
+
+-- Q. `direction` is the client's classification of the dodge ("Front", "Back", "Left", "Right").
+-- Charges: every dodge restarts the recharge timer; when it completes, all charges refill.
+function CombatService.dash(model: Model, direction: string): boolean
+	local state = states[model]
+	if not state or isStunned(state) or state.dodgeCharges <= 0 then
+		return false
+	end
+	local t = now()
+
+	state.dodgeCharges -= 1
+	state.dodgeRechargeAt = t + Config.Dash.RechargeTime
+	state.iframeUntil = t + Config.Dash.IFrames
+	model:SetAttribute("DodgeCharges", state.dodgeCharges)
+	setBlocking(state, false) -- dodging drops your guard
+
+	if direction == "Front" then
+		CombatService.attack(model, true)
+	end
+	return true
+end
+
+-- Per-frame upkeep: clear expired stuns, regenerate posture, refill dodges.
 RunService.Heartbeat:Connect(function(dt)
 	local t = now()
 	for model, state in states do
@@ -313,6 +382,11 @@ RunService.Heartbeat:Connect(function(dt)
 		if state.posture > 0 and t - state.lastPostureHit >= Config.Block.PostureRegenDelay then
 			state.posture = math.max(0, state.posture - Config.Block.PostureRegenRate * dt)
 			model:SetAttribute("Posture", math.floor(state.posture))
+		end
+
+		if state.dodgeCharges < Config.Dash.Charges and t >= state.dodgeRechargeAt then
+			state.dodgeCharges = Config.Dash.Charges
+			model:SetAttribute("DodgeCharges", state.dodgeCharges)
 		end
 	end
 end)

@@ -1,7 +1,7 @@
 -- Training dummies so the combat loop can be tested solo:
 --   Training Dummy   stands still, takes hits
 --   Blocker Dummy    always holds block, for testing posture / guard breaks
---   Swordsman Dummy  swings at the nearest player, for practising parries
+--   Swordsman Dummy  swings at the nearest player and sometimes feints, for practising parries
 
 local Players = game:GetService("Players")
 
@@ -13,6 +13,9 @@ local Dummies = {}
 local RESPAWN_DELAY = 3
 local SWORDSMAN_AGGRO_RANGE = 14
 local SWORDSMAN_SWING_INTERVAL = 2
+local SWORDSMAN_FEINT_CHANCE = 0.35
+local SWORDSMAN_FEINT_AFTER = 0.12 -- seconds into the windup before feinting
+local SWORDSMAN_RESWING_DELAY = 0.35 -- pause after a feint before the real swing
 
 type Behavior = "Idle" | "Blocker" | "Swordsman"
 
@@ -58,7 +61,13 @@ local function runBehavior(model: Model, behavior: Behavior)
 			if target then
 				local flatTarget = Vector3.new(target.Position.X, root.Position.Y, target.Position.Z)
 				root.CFrame = CFrame.lookAt(root.Position, flatTarget)
-				CombatService.attack(model)
+				if CombatService.attack(model) and math.random() < SWORDSMAN_FEINT_CHANCE then
+					task.wait(SWORDSMAN_FEINT_AFTER)
+					if CombatService.feint(model) then
+						task.wait(SWORDSMAN_RESWING_DELAY)
+						CombatService.attack(model)
+					end
+				end
 			else
 				root.CFrame = home
 			end
@@ -70,7 +79,7 @@ local function runBehavior(model: Model, behavior: Behavior)
 end
 
 local function spawnDummy(definition)
-	local model = Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R15)
+	local model = Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R6)
 	model.Name = definition.name
 	model:PivotTo(CFrame.new(definition.position))
 	model.Parent = workspace
