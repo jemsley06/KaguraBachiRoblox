@@ -14,13 +14,15 @@ The code is synced into Roblox Studio with [Rojo](https://rojo.space):
 
 | Input | Action |
 | --- | --- |
-| M1 | Attack (4-hit combo, the last hit is a heavier finisher) |
+| M1 | Attack (4-hit combo, hits stun so the chain can't be escaped. The last hit does 1.2x damage and knocks the target away) |
+| M2 | Feint: cancel a swing during its windup (2s cooldown) |
 | F (tap) | Parry: the first 0.2s of a block deflects a hit and stuns the attacker |
 | F (hold) | Block: no HP damage, but fills posture. A full posture bar breaks your guard |
-| Q | Dash in your movement direction (forward if standing still), with brief i-frames |
+| Q | Dodge forward, back, left or right (2 charges, 0.3s i-frames). The forward dodge is a longer lunge ending in a dash attack that opens the combo |
 | W W | Double-tap W to sprint |
+| Left Shift | Toggle shift lock |
 
-Missing a parry ("whiffing") locks parry out for a moment, so spamming F only blocks.
+See [DESIGN.md](DESIGN.md) for the game's direction and all the key values.
 
 ## Training dummies
 
@@ -28,7 +30,7 @@ Three dummies spawn in front of the spawn point:
 
 - **Training Dummy**: stands still.
 - **Blocker Dummy**: always blocks. Use it to test posture and guard breaks.
-- **Swordsman Dummy**: swings at you every 2s. Press F when its blade glints white to parry.
+- **Swordsman Dummy**: swings at you every 2s and sometimes feints. Press F when it actually commits.
 
 ## Layout
 
@@ -39,7 +41,10 @@ src/server/CombatService.luau   server-authoritative hit resolution: parry, bloc
 src/server/CombatServer.server  character registration and input routing
 src/server/Dummies.luau         training dummies
 src/server/Fx.luau              placeholder visuals (highlights, slash trail)
-src/server/Sword.luau           placeholder katana welded to the right hand
-src/client/Movement.luau        sprint, dash, WalkSpeed from combat state
+src/server/Sword.luau           placeholder katana welded to the right arm
+src/client/Movement.luau        momentum, sprint, dodges
+src/client/ShiftLock.luau       custom shift lock
+src/client/SwordAnimator.luau   procedural placeholder swing animation
+src/client/Hud.luau             dodge charges, feint cooldown, shift lock indicator
 src/client/CombatInput.client   keybinds
 ```

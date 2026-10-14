@@ -1,16 +1,28 @@
 -- Server-authoritative combat state for any character model (players and NPCs alike).
 --
 -- Replicated attributes set on each registered model, read by clients:
---   Stunned   (bool)   can't move, attack, block or dash
---   Blocking  (bool)   F is held
---   Attacking (bool)   in a swing's windup
---   Posture   (number) 0..PostureMax, guard breaks when full
+--   Stunned       (bool)    can't move, attack, block or dodge
+--   Blocking      (bool)    F is held
+--   Attacking     (bool)    in a swing's windup
+--   Posture       (number)  PostureMax..0, drained by blocked hits, guard breaks at 0
+--   Ragdolled     (bool)    limp from a finisher; the physics owner applies the humanoid state
+--   SwingPhase    (string)  "None" | "Windup" | "Slash", drives the swing animation
+--   SwingVariant  (number)  which combo hit is being swung (1..ComboLength)
+--   DodgeCharges  (number)  dodges available
+--   FeintReadyAt  (number)  workspace:GetServerTimeNow() when feint is off cooldown
 
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Config = require(ReplicatedStorage.Shared.CombatConfig)
+local Knockback = require(ReplicatedStorage.Shared.Knockback)
+local Ragdoll = require(ReplicatedStorage.Shared.Ragdoll)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
 local Fx = require(script.Parent.Fx)
+
+type AttackProfile = Config.AttackProfile
 
 export type CombatState = {
 	model: Model,
@@ -19,6 +31,7 @@ export type CombatState = {
 
 	stunUntil: number,
 	iframeUntil: number,
+	ragdolled: boolean,
 
 	blocking: boolean,
 	posture: number,
@@ -35,9 +48,14 @@ export type CombatState = {
 	attackReadyAt: number,
 	combo: number,
 	lastAttackTime: number,
+	feintReadyAt: number,
 
-	dashReadyAt: number,
+	dodgeCharges: number,
+	dodgeRechargeAt: number,
 }
+
+local COMBATANT_TAG = "Combatant"
+local SLASH_POSE_TIME = 0.2 -- how long the follow-through pose is held after the hit frame
 
 local CombatService = {}
 
@@ -65,15 +83,34 @@ local function setAttacking(state: CombatState, value: boolean)
 	state.model:SetAttribute("Attacking", value)
 end
 
+-- Cancels a pending swing without stunning (used by stuns and feints).
+local function cancelSwing(state: CombatState)
+	state.attackToken += 1
+	setAttacking(state, false)
+	state.model:SetAttribute("SwingPhase", "None")
+	Fx.clearWindup(state.model)
+end
+
 -- Stun interrupts everything: pending swings, blocks, and parry windows.
 local function applyStun(state: CombatState, duration: number)
 	state.stunUntil = math.max(state.stunUntil, now() + duration)
-	state.attackToken += 1
 	state.parryWindowEnd = 0
-	setAttacking(state, false)
+	cancelSwing(state)
 	setBlocking(state, false)
-	Fx.clearWindup(state.model)
 	state.model:SetAttribute("Stunned", true)
+end
+
+-- Ragdoll lasts until the stun ends (cleared in the Heartbeat upkeep below).
+local function setRagdoll(state: CombatState, on: boolean)
+	if state.ragdolled == on then
+		return
+	end
+	state.ragdolled = on
+	Ragdoll.setJoints(state.model, on)
+	state.model:SetAttribute("Ragdolled", on)
+	if not Players:GetPlayerFromCharacter(state.model) then
+		Ragdoll.setState(state.humanoid, on)
+	end
 end
 
 -- Is `defender` facing toward `attacker` closely enough to block/parry?
@@ -111,8 +148,9 @@ function CombatService.register(model: Model): CombatState?
 		root = root,
 		stunUntil = 0,
 		iframeUntil = 0,
+		ragdolled = false,
 		blocking = false,
-		posture = 0,
+		posture = Config.Block.PostureMax,
 		lastPostureHit = 0,
 		parryWindowEnd = 0,
 		parryCooldownUntil = 0,
@@ -124,14 +162,22 @@ function CombatService.register(model: Model): CombatState?
 		attackReadyAt = 0,
 		combo = 0,
 		lastAttackTime = 0,
-		dashReadyAt = 0,
+		feintReadyAt = 0,
+		dodgeCharges = Config.Dash.Charges,
+		dodgeRechargeAt = 0,
 	}
 	states[model] = state
 
 	model:SetAttribute("Stunned", false)
 	model:SetAttribute("Blocking", false)
 	model:SetAttribute("Attacking", false)
-	model:SetAttribute("Posture", 0)
+	model:SetAttribute("Posture", state.posture)
+	model:SetAttribute("Ragdolled", false)
+	model:SetAttribute("SwingPhase", "None")
+	model:SetAttribute("SwingVariant", 1)
+	model:SetAttribute("DodgeCharges", state.dodgeCharges)
+	model:SetAttribute("FeintReadyAt", 0)
+	CollectionService:AddTag(model, COMBATANT_TAG)
 
 	humanoid.Died:Connect(function()
 		states[model] = nil
@@ -187,25 +233,30 @@ function CombatService.stopBlock(model: Model)
 	end
 end
 
-function CombatService.dash(model: Model): boolean
-	local state = states[model]
-	if not state or isStunned(state) then
-		return false
+-- Players own their character's physics, so their own client applies the launch;
+-- the server applies it directly to NPCs.
+local function launch(attacker: CombatState, defender: CombatState, speed: number, upSpeed: number)
+	local away = defender.root.Position - attacker.root.Position
+	away = Vector3.new(away.X, 0, away.Z)
+	if away.Magnitude < 1e-3 then
+		away = attacker.root.CFrame.LookVector
+		away = Vector3.new(away.X, 0, away.Z)
 	end
-	local t = now()
-	if t < state.dashReadyAt then
-		return false
+	local horizontal = if speed > 0 then away.Unit * speed else Vector3.zero
+	local cfg = Config.Attack
+
+	local player = Players:GetPlayerFromCharacter(defender.model)
+	if player then
+		Remotes.Knockback:FireClient(player, horizontal, upSpeed, cfg.KnockbackDuration)
+	else
+		Knockback.apply(defender.root, horizontal, upSpeed, cfg.KnockbackDuration)
 	end
-	state.dashReadyAt = t + Config.Dash.Cooldown
-	state.iframeUntil = t + Config.Dash.IFrames
-	return true
 end
 
 type HitResult = "Dodged" | "Parried" | "Blocked" | "GuardBroken" | "Hit"
 
-local function resolveHit(attacker: CombatState, defender: CombatState, isFinisher: boolean): HitResult
+local function resolveHit(attacker: CombatState, defender: CombatState, profile: AttackProfile): HitResult
 	local t = now()
-	local cfg = Config.Attack
 
 	if t < defender.iframeUntil then
 		return "Dodged"
@@ -224,11 +275,11 @@ local function resolveHit(attacker: CombatState, defender: CombatState, isFinish
 	end
 
 	if facing and defender.blocking then
-		defender.posture += if isFinisher then cfg.FinisherPostureDamage else cfg.PostureDamage
+		defender.posture -= profile.PostureDamage
 		defender.lastPostureHit = t
-		if defender.posture >= Config.Block.PostureMax then
-			defender.posture = 0
-			defender.model:SetAttribute("Posture", 0)
+		if defender.posture <= 0 then
+			defender.posture = Config.Block.PostureMax
+			defender.model:SetAttribute("Posture", defender.posture)
 			applyStun(defender, Config.Block.GuardBreakStun)
 			Fx.flash(defender.model, Color3.fromRGB(255, 140, 0), 0.5)
 			return "GuardBroken"
@@ -238,44 +289,83 @@ local function resolveHit(attacker: CombatState, defender: CombatState, isFinish
 		return "Blocked"
 	end
 
-	defender.humanoid:TakeDamage(if isFinisher then cfg.FinisherDamage else cfg.Damage)
-	applyStun(defender, cfg.HitStun)
+	defender.humanoid:TakeDamage(profile.Damage)
+	-- Hitstun outlasts the gap to the attacker's next hit, so M1 chains are true combos.
+	applyStun(defender, profile.HitStun)
+	if profile.Ragdoll then
+		setRagdoll(defender, true)
+	end
+	if profile.Knockback or profile.LaunchUp then
+		launch(attacker, defender, profile.Knockback or 0, profile.LaunchUp or 0)
+	end
 	Fx.flash(defender.model, Color3.fromRGB(255, 40, 40), 0.2)
 	return "Hit"
 end
 
-local function performHit(state: CombatState, isFinisher: boolean)
-	local cfg = Config.Attack
-	local boxCFrame = state.root.CFrame * CFrame.new(0, 0, -cfg.Range / 2)
-	local boxSize = Vector3.new(cfg.Width, 5, cfg.Range)
+-- A box in front of the attacker, optionally stretched downward (downslam).
+local function getHitBox(state: CombatState, profile: AttackProfile): (CFrame, Vector3)
+	local reachDown = profile.ReachDown or 0
+	local offset = CFrame.new(0, -reachDown / 2, -profile.Range / 2)
+	return state.root.CFrame * offset, Vector3.new(profile.Width, 5 + reachDown, profile.Range)
+end
 
-	Fx.slash(boxCFrame, boxSize, isFinisher)
-
+-- Living combatants (other than the attacker) inside the attack's hitbox.
+local function findTargets(state: CombatState, profile: AttackProfile): { CombatState }
+	local boxCFrame, boxSize = getHitBox(state, profile)
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = { state.model }
 
-	local alreadyHit: { [Model]: boolean } = {}
+	local targets: { CombatState } = {}
+	local seen: { [Model]: boolean } = {}
 	for _, part in workspace:GetPartBoundsInBox(boxCFrame, boxSize, params) do
 		local model = part:FindFirstAncestorOfClass("Model")
-		if model and not alreadyHit[model] then
-			alreadyHit[model] = true
+		if model and not seen[model] then
+			seen[model] = true
 			local defender = states[model]
 			if defender and defender.humanoid.Health > 0 then
-				resolveHit(state, defender, isFinisher)
+				table.insert(targets, defender)
 			end
 		end
 	end
+	return targets
 end
 
-function CombatService.attack(model: Model)
+-- The hit frame: show the slash pose, then resolve everything in the hitbox.
+local function strike(state: CombatState, token: number, profile: AttackProfile, isHeavy: boolean)
+	local model = state.model
+	setAttacking(state, false)
+	Fx.clearWindup(model)
+	model:SetAttribute("SwingPhase", "Slash")
+	local boxCFrame, boxSize = getHitBox(state, profile)
+	Fx.slash(boxCFrame, boxSize, isHeavy)
+	for _, defender in findTargets(state, profile) do
+		resolveHit(state, defender, profile)
+	end
+
+	task.delay(SLASH_POSE_TIME, function()
+		if states[model] == state and state.attackToken == token then
+			model:SetAttribute("SwingPhase", "None")
+		end
+	end)
+end
+
+local function isAirborne(humanoid: Humanoid): boolean
+	local humanoidState = humanoid:GetState()
+	return humanoidState == Enum.HumanoidStateType.Freefall or humanoidState == Enum.HumanoidStateType.Jumping
+end
+
+-- M1. `modifier` only matters on the finisher: "Up" (Space held) uppercuts,
+-- "Down" (airborne, checked here too) downslams.
+-- Returns whether a swing started.
+function CombatService.attack(model: Model, modifier: string?): boolean
 	local state = states[model]
 	if not state or state.blocking or state.attacking or isStunned(state) then
-		return
+		return false
 	end
 	local t = now()
 	if t < state.attackReadyAt then
-		return
+		return false
 	end
 
 	local cfg = Config.Attack
@@ -284,35 +374,135 @@ function CombatService.attack(model: Model)
 	end
 	state.combo = state.combo % cfg.ComboLength + 1
 	state.lastAttackTime = t
-	local isFinisher = state.combo == cfg.ComboLength
 
-	state.attackReadyAt = t + cfg.Windup + (if isFinisher then cfg.FinisherCooldown else cfg.Cooldown)
+	local isFinisher = state.combo == cfg.ComboLength
+	local profile: AttackProfile = cfg.Combo[state.combo]
+	if isFinisher then
+		profile = if modifier == "Up"
+			then cfg.Uppercut
+			elseif modifier == "Down" and isAirborne(state.humanoid) then cfg.Downslam
+			else cfg.Finisher
+	end
+
+	state.attackReadyAt = t + profile.Windup + profile.Recovery
 	state.attackToken += 1
 	local token = state.attackToken
 	setAttacking(state, true)
-	Fx.windup(model, cfg.Windup, isFinisher)
+	model:SetAttribute("SwingVariant", state.combo)
+	model:SetAttribute("SwingPhase", "Windup")
+	Fx.windup(model, profile.Windup, isFinisher)
 
-	task.delay(cfg.Windup, function()
-		-- A stun (hit, parry, guard break) during windup bumps the token and cancels the swing.
-		if states[model] ~= state or state.attackToken ~= token then
-			return
+	task.delay(profile.Windup, function()
+		-- A stun or feint during windup bumps the token and cancels the swing.
+		if states[model] == state and state.attackToken == token then
+			strike(state, token, profile, isFinisher)
 		end
-		setAttacking(state, false)
-		performHit(state, isFinisher)
+	end)
+	return true
+end
+
+-- Forward dodge: the lunge is the windup, and the hit lands on first contact.
+-- A lunge that touches nobody whiffs quietly and doesn't open the combo.
+local function startDashAttack(state: CombatState)
+	local model = state.model
+	if state.attacking or now() < state.attackReadyAt then
+		return
+	end
+	local profile = Config.Attack.Dash
+	local window = Config.Dash.FrontDuration + Config.Dash.ContactGrace
+	local deadline = now() + window
+
+	state.attackReadyAt = deadline
+	state.attackToken += 1
+	local token = state.attackToken
+	setAttacking(state, true)
+	model:SetAttribute("SwingVariant", 1)
+	model:SetAttribute("SwingPhase", "Windup")
+	Fx.windup(model, window, false)
+
+	task.spawn(function()
+		while now() < deadline do
+			RunService.Heartbeat:Wait()
+			if states[model] ~= state or state.attackToken ~= token then
+				return
+			end
+			if #findTargets(state, profile) > 0 then
+				local t = now()
+				state.combo = 1 -- the next M1 is hit 2
+				state.lastAttackTime = t
+				state.attackReadyAt = t + profile.Recovery
+				strike(state, token, profile, false)
+				return
+			end
+		end
+		if states[model] == state and state.attackToken == token then
+			setAttacking(state, false)
+			model:SetAttribute("SwingPhase", "None")
+		end
 	end)
 end
 
--- Per-frame upkeep: clear expired stuns, regenerate posture.
+-- M2 during windup: cancel the swing to bait a parry. The feinted swing doesn't
+-- advance the combo, and a new swing can start almost immediately.
+function CombatService.feint(model: Model): boolean
+	local state = states[model]
+	if not state or not state.attacking or isStunned(state) then
+		return false
+	end
+	local t = now()
+	if t < state.feintReadyAt then
+		return false
+	end
+
+	cancelSwing(state)
+	state.combo = math.max(0, state.combo - 1)
+	state.attackReadyAt = t + Config.Feint.ReswingDelay
+	state.feintReadyAt = t + Config.Feint.Cooldown
+	model:SetAttribute("FeintReadyAt", workspace:GetServerTimeNow() + Config.Feint.Cooldown)
+	return true
+end
+
+-- Q. `direction` is the client's classification of the dodge ("Front", "Back", "Left", "Right").
+-- Charges: every dodge restarts the recharge timer; when it completes, all charges refill.
+function CombatService.dash(model: Model, direction: string): boolean
+	local state = states[model]
+	if not state or isStunned(state) or state.dodgeCharges <= 0 then
+		return false
+	end
+	local t = now()
+
+	local isFront = direction == "Front"
+	-- The forward lunge is a commitment: it spends every charge.
+	state.dodgeCharges = if isFront then 0 else state.dodgeCharges - 1
+	state.dodgeRechargeAt = t + Config.Dash.RechargeTime
+	state.iframeUntil = t + Config.Dash.IFrames
+	model:SetAttribute("DodgeCharges", state.dodgeCharges)
+	setBlocking(state, false) -- dodging drops your guard
+
+	if isFront then
+		startDashAttack(state)
+	end
+	return true
+end
+
+-- Per-frame upkeep: clear expired stuns and ragdolls, regenerate posture, refill dodges.
 RunService.Heartbeat:Connect(function(dt)
 	local t = now()
 	for model, state in states do
 		if model:GetAttribute("Stunned") and t >= state.stunUntil then
 			model:SetAttribute("Stunned", false)
+			setRagdoll(state, false)
 		end
 
-		if state.posture > 0 and t - state.lastPostureHit >= Config.Block.PostureRegenDelay then
-			state.posture = math.max(0, state.posture - Config.Block.PostureRegenRate * dt)
-			model:SetAttribute("Posture", math.floor(state.posture))
+		local postureMax = Config.Block.PostureMax
+		if state.posture < postureMax and t - state.lastPostureHit >= Config.Block.PostureRegenDelay then
+			state.posture = math.min(postureMax, state.posture + Config.Block.PostureRegenRate * dt)
+			model:SetAttribute("Posture", math.ceil(state.posture))
+		end
+
+		if state.dodgeCharges < Config.Dash.Charges and t >= state.dodgeRechargeAt then
+			state.dodgeCharges = Config.Dash.Charges
+			model:SetAttribute("DodgeCharges", state.dodgeCharges)
 		end
 	end
 end)

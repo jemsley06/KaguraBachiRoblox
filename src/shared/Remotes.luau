@@ -26,6 +26,8 @@ local function getEvent(name: string): RemoteEvent
 end
 
 return {
-	-- Client -> server: ("BlockStart" | "BlockEnd" | "Attack" | "Dash")
+	-- Client -> server: ("BlockStart" | "BlockEnd" | "Feint"), ("Attack", "Up" | "Down" | nil), ("Dash", direction)
 	Combat = getEvent("Combat"),
+	-- Server -> victim's client: (horizontalVelocity: Vector3, upSpeed: number, duration: number)
+	Knockback = getEvent("Knockback"),
 }
