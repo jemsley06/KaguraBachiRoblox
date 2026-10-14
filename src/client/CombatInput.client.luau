@@ -19,15 +19,15 @@ require(script.Parent.SwordAnimator)
 require(script.Parent.Hud)
 
 -- Finisher modifier sent with every M1; the server only uses it on the last hit.
--- Holding Space wins over being airborne, since holding Space also jumps.
+-- Airborne wins: swings keep you grounded (Movement), so being in the air means you jumped on purpose.
 local function getAttackModifier(): string?
-	if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-		return "Up"
-	end
 	local character = Players.LocalPlayer.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if humanoid and humanoid.FloorMaterial == Enum.Material.Air then
 		return "Down"
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+		return "Up"
 	end
 	return nil
 end

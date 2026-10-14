@@ -22,8 +22,8 @@ if you change a value there, update this table too.
 | Input | Action |
 | --- | --- |
 | M1 | Swing (4-hit combo) |
-| Space (held) + M1 | Finisher becomes an uppercut |
-| M1 while airborne | Finisher becomes a downslam |
+| Space (held) + M1 | Finisher becomes an uppercut (you stay grounded) |
+| Jump, then M1 | Finisher becomes a downslam |
 | M2 (during windup) | Feint: cancel the swing to bait a parry |
 | F (tap) | Parry |
 | F (hold) | Block |
@@ -71,6 +71,12 @@ Every finisher ragdolls the target for its stun duration.
 | Knockback | M1 | 60 studs/s away, 22 up | 1.0s |
 | Uppercut | Hold Space + M1 | 8 away, 75 up | 1.4s |
 | Downslam | M1 while airborne | Slammed down at 80 | 1.2s |
+
+Swings keep you grounded: you can't jump during a swing's windup or slash, and
+Space held from a swing stays a non-jump until released. A fresh Space press
+between swings still jumps, which is how you set up a downslam. Being airborne
+takes priority over holding Space. The downslam hitbox reaches 9 studs below
+you, so it connects with grounded opponents.
 
 ### Feints
 

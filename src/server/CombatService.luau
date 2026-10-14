@@ -302,8 +302,11 @@ local function resolveHit(attacker: CombatState, defender: CombatState, profile:
 	return "Hit"
 end
 
+-- A box in front of the attacker, optionally stretched downward (downslam).
 local function getHitBox(state: CombatState, profile: AttackProfile): (CFrame, Vector3)
-	return state.root.CFrame * CFrame.new(0, 0, -profile.Range / 2), Vector3.new(profile.Width, 5, profile.Range)
+	local reachDown = profile.ReachDown or 0
+	local offset = CFrame.new(0, -reachDown / 2, -profile.Range / 2)
+	return state.root.CFrame * offset, Vector3.new(profile.Width, 5 + reachDown, profile.Range)
 end
 
 -- Living combatants (other than the attacker) inside the attack's hitbox.

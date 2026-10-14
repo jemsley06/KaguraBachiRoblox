@@ -72,6 +72,7 @@ export type AttackProfile = {
 	Knockback: number?, -- horizontal launch speed on a clean hit (studs/s)
 	LaunchUp: number?, -- vertical launch speed on a clean hit; negative slams down
 	Ragdoll: boolean?,
+	ReachDown: number?, -- extends the hitbox this many studs below the attacker
 }
 
 local BASE_DAMAGE = 8
@@ -91,10 +92,11 @@ local function comboHit(windup: number, recovery: number): AttackProfile
 end
 
 -- Finisher variants share everything except how the target is launched.
-local function finisher(knockback: number, launchUp: number, hitStun: number): AttackProfile
+local function finisher(knockback: number, launchUp: number, hitStun: number, reachDown: number?): AttackProfile
 	return {
 		Windup = 0.3,
 		Recovery = 1.0,
+		ReachDown = reachDown,
 		Range = 7,
 		Width = 7,
 		Damage = BASE_DAMAGE * 1.2,
@@ -122,7 +124,9 @@ CombatConfig.Attack = {
 
 	Finisher = finisher(60, 22, 1.0), -- M1: knocks the target away
 	Uppercut = finisher(8, 75, 1.4), -- Space held + M1: launches the target up
-	Downslam = finisher(0, -80, 1.2), -- M1 while airborne: slams the target down
+	-- M1 while airborne: slams the target down. The hitbox reaches below you
+	-- (a default jump peaks around 6-7 studs up).
+	Downslam = finisher(0, -80, 1.2, 9),
 
 	-- Forward dodge. Hits on contact, then counts as hit 1 of the combo.
 	Dash = {

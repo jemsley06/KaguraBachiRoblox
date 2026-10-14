@@ -5,6 +5,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Config = require(ReplicatedStorage.Shared.CombatConfig)
@@ -20,6 +21,9 @@ local sprinting = false
 local lastForwardTap = 0
 local dashing = false
 local jumpEnabled = true
+-- Space held since a swing started: stays grounded until Space is released, so
+-- holding Space for an uppercut never turns into a jump between swings.
+local heldJumpLock = false
 local ragdolled = false
 local currentSpeed = Config.Movement.WalkSpeed
 
@@ -239,8 +243,13 @@ local function update(dt: number)
 		Ragdoll.setState(humanoid, ragdolled)
 	end
 
-	if jumpEnabled == stunned then
-		jumpEnabled = not stunned
+	-- Grounded while swinging. A fresh Space press between swings still jumps (for downslams).
+	local phase = character:GetAttribute("SwingPhase")
+	local swinging = phase == "Windup" or phase == "Slash"
+	heldJumpLock = UserInputService:IsKeyDown(Enum.KeyCode.Space) and (heldJumpLock or swinging)
+	local canJump = not (stunned or swinging or heldJumpLock)
+	if jumpEnabled ~= canJump then
+		jumpEnabled = canJump
 		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, jumpEnabled)
 	end
 
@@ -254,6 +263,7 @@ player.CharacterAdded:Connect(function()
 	sprinting = false
 	dashing = false
 	jumpEnabled = true
+	heldJumpLock = false
 	ragdolled = false
 	currentSpeed = Config.Movement.WalkSpeed
 	dodgeCharges = Config.Dash.Charges
